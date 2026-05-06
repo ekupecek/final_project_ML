@@ -1,6 +1,11 @@
 # Ignore processed/generated datasets
 data/processed/
 
+# Generated ML artifacts
+models/
+submissions/
+reports/
+
 # Ignore parquet files
 *.parquet
 
