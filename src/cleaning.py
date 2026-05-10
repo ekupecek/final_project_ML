@@ -104,7 +104,22 @@ def add_basic_features(df: pd.DataFrame) -> pd.DataFrame:
     df["abs_y"] = df["coor_y"].abs()
     df["power_x_time"] = df["power"] * df["time_years"]
     df["power_over_r_xy"] = df["power"] / (df["r_xy"] + 1e-6)
-    return df
+    df["log_time"] = np.log1p(df["time_years"])
+    df["sqrt_time"] = np.sqrt(df["time_years"])
+    df["inv_r_xy"] = 1 / (df["r_xy"] + 1e-3)
+
+    df["x2"] = df["coor_x"] ** 2
+    df["y2"] = df["coor_y"] ** 2
+    df["z2"] = df["coor_z"] ** 2
+    df["xy"] = df["coor_x"] * df["coor_y"]
+    df["xz"] = df["coor_x"] * df["coor_z"]
+    df["yz"] = df["coor_y"] * df["coor_z"]
+
+    df["power_log_time"] = df["power"] * df["log_time"]
+    df["power_sqrt_time"] = df["power"] * df["sqrt_time"]
+    df["power_inv_r_xy"] = df["power"] * df["inv_r_xy"]
+    df["time_over_r_xy"] = df["time_years"] / (df["r_xy"] + 1e-3)
+    return df 
 
 
 # -----------------------------
