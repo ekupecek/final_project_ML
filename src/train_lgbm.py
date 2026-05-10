@@ -26,7 +26,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from sklearn.ensemble import HistGradientBoostingRegressor
+from lightgbm import LGBMRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupShuffleSplit, train_test_split
 from sklearn.inspection import permutation_importance
@@ -70,6 +70,20 @@ FEATURE_COLUMNS = [
     "abs_y",
     "power_x_time",
     "power_over_r_xy",
+    "log_time",
+    "inv_r_xy",
+    "x2",
+    "y2",
+    "xy",
+    "power_log_time",
+    "power_inv_r_xy",
+    "log_time",
+    "sqrt_time",
+    "z2",
+    "xz",
+    "yz",
+    "power_sqrt_time",
+    "time_over_r_xy",
 ]
 
 
@@ -93,6 +107,16 @@ def load_processed_data() -> tuple[pd.DataFrame, pd.DataFrame]:
     test = pd.read_parquet(test_path)
     return train, test
 
+def add_extra_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["log_time"] = np.log1p(df["time_years"])
+    df["inv_r_xy"] = 1.0 / (df["r_xy"] + 1e-3)
+    df["x2"] = df["coor_x"] ** 2
+    df["y2"] = df["coor_y"] ** 2
+    df["xy"] = df["coor_x"] * df["coor_y"]
+    df["power_log_time"] = df["power"] * df["log_time"]
+    df["power_inv_r_xy"] = df["power"] * df["inv_r_xy"]
+    return df
 
 def get_feature_columns(train: pd.DataFrame, test: pd.DataFrame) -> list[str]:
     usable = [c for c in FEATURE_COLUMNS if c in train.columns and c in test.columns]
@@ -145,17 +169,20 @@ def create_sensor_validation_split(train: pd.DataFrame) -> tuple[pd.DataFrame, p
     return train_part, val_part
 
 
-def make_model() -> HistGradientBoostingRegressor:
-    """A strong but simple first baseline available in scikit-learn."""
-    return HistGradientBoostingRegressor(
-        loss="squared_error",
-        learning_rate=0.08,
-        max_iter=250,
-        max_leaf_nodes=31,
-        l2_regularization=0.01,
-        early_stopping=True,
-        validation_fraction=0.10,
-        random_state=RANDOM_STATE,
+def make_model() -> LGBMRegressor:
+    return LGBMRegressor(
+        objective="regression",
+        n_estimators=4000,
+        learning_rate=0.015,
+        num_leaves=128,
+        max_depth=-1,
+        min_child_samples=30,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        reg_alpha=0.05,
+        reg_lambda=0.5,
+        random_state=42,
+        n_jobs=-1,
     )
 
 
@@ -187,7 +214,7 @@ def save_submission(test: pd.DataFrame, predictions: np.ndarray) -> Path:
     else:
         submission = pd.DataFrame({"Id": np.arange(len(test)), TARGET: predictions})
 
-    output_path = SUBMISSIONS_DIR / "baseline_submission.csv"
+    output_path = SUBMISSIONS_DIR / "lgbm_features_v2_submission.csv"
     submission.to_csv(output_path, index=False)
     return output_path
 
@@ -198,6 +225,8 @@ def save_submission(test: pd.DataFrame, predictions: np.ndarray) -> Path:
 def main() -> None:
     print("Loading processed data...")
     train, test = load_processed_data()
+    train = add_extra_features(train)
+    test = add_extra_features(test)
     print(f"Cleaned train shape: {train.shape}")
     print(f"Processed test shape: {test.shape}")
 
@@ -238,7 +267,7 @@ def main() -> None:
     val_pred = model.predict(X_val)
     metrics = evaluate_predictions(y_val, val_pred)
     metrics_df = pd.DataFrame([metrics])
-    metrics_path = REPORTS_DIR / "baseline_metrics.csv"
+    metrics_path = REPORTS_DIR / "lgbm_features_v2_metrics.csv"
     metrics_df.to_csv(metrics_path, index=False)
 
     print("\nValidation metrics:")
@@ -280,7 +309,7 @@ def main() -> None:
     final_model = make_model()
     final_model.fit(final_train[features], final_train[TARGET])
 
-    model_path = MODELS_DIR / "baseline_hist_gradient_boosting.joblib"
+    model_path = MODELS_DIR / "lgbm_features_v2.joblib"
     joblib.dump({"model": final_model, "features": features}, model_path)
     print(f"Saved model to: {model_path}")
 
