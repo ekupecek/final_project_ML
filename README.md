@@ -1,180 +1,191 @@
-# Prédiction de température — Stockage de déchets nucléaires
+# Temperature Prediction — Nuclear Waste Storage Tunnel
 
-Projet de machine learning pour prédire les températures dans un tunnel de stockage de déchets nucléaires à partir de mesures de capteurs spatiaux et temporels.
+Machine learning project to predict rock temperatures in a nuclear waste storage tunnel (Mont-Terri experiment, EPFL) from spatial and temporal sensor measurements.
 
----
-
-## Contexte
-
-Des capteurs répartis en 3D dans un tunnel mesurent la température en continu. L'objectif est de prédire la température à des positions où aucun capteur n'existe, à partir des mesures des capteurs voisins, du temps écoulé et de la puissance de chauffage.
-
-**Données :**
-- `train.parquet` — 6 626 928 lignes (capteur, temps, puissance, température)
-- `test.parquet`  — 2 190 480 lignes (à prédire)
-- `sensors.parquet` — 232 capteurs avec coordonnées (x, y, z)
-
-**Métrique Kaggle :** RMSE (Root Mean Squared Error) — erreur en °C
+**Group 12 — Anna Billon, Eva Kupecek**
 
 ---
 
-## Structure du projet
+## Problem Statement
+
+Sensors distributed in a 2D cross-section of a tunnel measure temperature continuously over ~250 years. The goal is to predict temperature at positions where no sensor exists.
+
+The geometry consists of two zones around a central heated canister:
+- **Buffer** (coor_x < 1.4 m) — granular bentonite, many hot sensors
+- **OPA** (coor_x > 1.4 m) — Opalinus Clay host rock, fewer and cooler sensors
+
+The buffer boundary is a **vertical line at x = 1.4 m** (not a circle of radius 1.4 m).
+
+> OPA predictions are weighted more heavily in the final Kaggle metric.
+
+**Dataset:**
+| File | Rows | Description |
+|---|---|---|
+| `train.parquet` | 6 626 928 | 232 sensors × 9128 time steps |
+| `test.parquet` | 2 190 480 | 80 unknown sensors × 9127 time steps |
+| `sensors.parquet` | — | 3D coordinates of each sensor |
+
+**Key insight:** Test sensors are 0.2–1.5 units away from train sensors and share the same time steps. The problem is a **spatial interpolation**: at each time t, we know the temperature of 232 train sensors → predict the 80 test sensors.
+
+**Kaggle metric:** RMSE (°C, lower is better)
+
+---
+
+## Project Structure
 
 ```
 final_project_ML/
-├── data_parquet_2026/          # Données brutes (non versionnées)
-├── data/processed/             # Données nettoyées (générées, non versionnées)
+├── data_parquet_2026/           # Raw data (not versioned)
+├── data/processed/              # Cleaned data (generated, not versioned)
 ├── src/
-│   ├── cleaning.py             # Pipeline de nettoyage
-│   ├── train_baseline.py       # Modèle baseline HistGradientBoosting
-│   ├── train_lgbm.py           # LightGBM seul
-│   ├── train_features.py       # HistGB + features physiques
-│   ├── train_neighbor.py       # HistGB + température voisin (k=1)
-│   ├── train_neighbor_hybrid.py# HistGB + features spatiales hybrides ← meilleur
-│   ├── train_lgbm_hybrid.py    # LightGBM + features spatiales hybrides
-│   ├── train_lgbm_neighbor.py  # LightGBM + température voisins
-│   └── search_k_neighbors.py   # Recherche du meilleur k
-├── models/                     # Modèles entraînés (non versionnés)
-├── reports/                    # Métriques et importances de features
-├── submissions/                # Fichiers CSV à soumettre sur Kaggle
-└── README.md
+│   ├── cleaning.py              # Cleaning pipeline + feature engineering
+│   └── train_best.py            # Best model: HistGB + global IDW + KNN hybrid
+├── models/
+│   └── best_model.joblib        # Saved model (not versioned)
+├── reports/
+│   ├── best_metrics.csv         # Validation metrics
+│   └── best_feature_importance.csv  # Feature importance
+├── submissions/
+│   └── best_submission.csv      # Kaggle submission (Kaggle score: 3.42)
+└── train.ipynb                  # Full pipeline notebook (cleaning + model + analysis)
 ```
 
 ---
 
-## Reproduire les résultats
+## How to Reproduce
 
 ```bash
-# 1. Nettoyage des données
+# 1. Clean data and engineer base features
 python src/cleaning.py
 
-# 2. Meilleur modèle (HistGB + features spatiales hybrides)
-python src/train_neighbor_hybrid.py
-
-# 3. Soumission : submissions/neighbor_hybrid_submission.csv
+# 2. Train best model
+python src/train_best.py
+# → submissions/best_submission.csv
 ```
 
 ---
 
-## Pipeline de nettoyage (`cleaning.py`)
+## Cleaning Pipeline (`cleaning.py`)
 
-Le script effectue un nettoyage multi-couches :
+Four cascaded filters applied in order:
 
-| Étape | Description | Paramètre |
+| Step | Description | Parameter |
 |---|---|---|
-| Limites physiques | Supprime les températures < 0°C ou > 200°C | `TEMP_MIN=0`, `TEMP_MAX=200` |
-| IQR par capteur | Supprime les outliers à 4× l'IQR de chaque capteur | `IQR_MULTIPLIER=4.0` |
-| Spikes temporels | Détecte les pics isolés via z-score robuste sur fenêtre glissante | fenêtre=21, seuil=8σ |
-| Capteurs défaillants | Supprime les capteurs avec >20% de données mauvaises | seuil=20% |
-| Dérive temporelle | Identifie les capteurs avec une dérive anormale (slope z-score > 4) | seuil=4σ |
+| Physical limits | Remove temperatures < 0 °C or > 200 °C | `TEMP_MIN=0`, `TEMP_MAX=200` |
+| IQR per sensor | Outliers beyond 4× each sensor's IQR | `IQR_MULTIPLIER=4.0` |
+| Temporal spikes | Robust z-score on rolling window | window=21, threshold=8σ |
+| Failed sensors | Sensors with > 20% bad readings excluded | threshold=20% |
 
-**Résultats du nettoyage :**
-- Lignes supprimées : 311 862 (4.7%)
-- Capteurs défaillants retirés : 10
-- Données nettoyées : **6 180 661 lignes**, 232 → 222 capteurs actifs
+**Results:** 311 862 rows removed (4.7%), 10 sensors excluded → **6 180 661 rows**, 222 active sensors.
 
-**Features ajoutées :**
+Physical limits are applied first so extreme values (e.g. −9999 °C) do not inflate the IQR and mask moderate outliers.
 
-| Feature | Formule | Rôle |
+**Engineered base features:**
+
+| Feature | Formula | Physical meaning |
 |---|---|---|
-| `time_years` | `time / (365.25 × 24 × 3600)` | Temps en années |
-| `r_xy` | `√(x² + y²)` | Distance radiale 2D |
-| `r_xyz` | `√(x² + y² + z²)` | Distance 3D |
-| `abs_y` | `\|y\|` | Symétrie axiale |
-| `power_x_time` | `power × time_years` | Énergie cumulée |
-| `power_over_r_xy` | `power / r_xy` | Densité de puissance 2D |
+| `r_xy` | `√(x² + y²)` | 2D distance to canister (geometry is 2D) |
+| `r_xyz` | `√(x² + y² + z²)` | 3D distance to origin |
+| `time_years` | `time / (365.25 × 24 × 3600)` | Time in years |
+| `abs_y` | `\|y\|` | Vertical position |
+| `power_x_time` | `power × time_years` | Cumulative energy proxy |
+| `power_over_r_xy` | `power / r_xy` | Heat flux proxy |
 
 ---
 
-## Stratégie de validation
+## Validation Strategy
 
-**Split par capteur entier** (pas aléatoire) : 80% des capteurs pour l'entraînement, 20% pour la validation.
+**Sensor-level split** — entire sensors are held out to prevent data leakage. No validation sensor is used as a source for spatial features.
 
-Pourquoi ? Le but est de prédire des températures à des **positions sans capteur** — tenir des capteurs entiers en validation teste la généralisation spatiale, ce qui correspond au vrai test Kaggle.
-
-- Entraînement : **185 capteurs** — 4 930 181 lignes
-- Validation : **47 capteurs** — 1 250 480 lignes (jamais vus à l'entraînement)
-
----
-
-## Expériences et progression
-
-### Scores locaux (validation 47 capteurs)
-
-| Script | Modèle | RMSE | MAE | R² |
-|---|---|---|---|---|
-| `train_baseline.py` | HistGradientBoosting | 5.770 | 2.806 | 0.834 |
-| `train_lgbm.py` | LightGBM seul | 5.539 | 2.508 | 0.847 |
-| `train_features.py` | HistGB + features physiques | 5.869 | 2.811 | 0.828 |
-| `train_neighbor.py` | HistGB + voisin k=1 | 5.224 | 2.372 | 0.864 |
-| `train_neighbor_hybrid.py` | **HistGB + hybride k=1+5** | **5.289** | **2.403** | **0.860** |
-| `train_lgbm_hybrid.py` | LightGBM + hybride k=1+5 | 5.524 | 2.565 | 0.848 |
-
-### Scores Kaggle (public leaderboard)
-
-| Soumission | Score Kaggle | Δ vs baseline |
+| Set | Sensors | Rows |
 |---|---|---|
-| `baseline_submission.csv` | 4.054 | référence |
-| `lgbm_submission.csv` | 4.171 | +0.117 ↑ pire |
-| `neighbor_submission.csv` | 3.747 | −0.307 ✓ |
-| `neighbor_hybrid_submission.csv` | ~3.5 | −0.55 ✓ meilleur |
+| Training | 185 (80%) | ~4 930 000 |
+| Validation | 47 (20%) | ~1 250 000 |
 
 ---
 
-## Meilleure approche : features spatiales hybrides
+## Model Architecture
 
-### Principe
+### Global IDW — Inverse Distance Weighting
 
-Pour chaque point à prédire `(capteur_j, temps_t)`, on regarde ce que font les capteurs voisins **au même moment** :
+At each time step t, the known sensor temperatures form a spatial field. IDW interpolates the temperature at a query point by weighting each source sensor by the inverse square of its distance:
 
 ```
-nn_temp        = température du capteur le plus proche (k=1)
-nn_dist        = distance au capteur le plus proche
-broad_temp_mean = moyenne des 5 capteurs les plus proches (k=5)
-broad_temp_std  = écart-type des 5 capteurs (cohérence locale)
+T_idw(j, t) = Σᵢ [T_i(t) / d(j,i)²] / Σᵢ [1 / d(j,i)²]
 ```
 
-**k=1** apporte le signal fort (le voisin immédiat est très prédictif).
-**k=5** apporte la robustesse (lisse les mesures bruitées d'un capteur isolé).
+Uses all 222 source sensors. The IDW estimate is passed as a **feature** to HistGB (not used directly as a prediction).
 
-### Recherche du meilleur k (`search_k_neighbors.py`)
+### KNN Hybrid Features
 
-| k | RMSE local |
+Nearest-neighbour temperatures are looked up at each time step:
+
+| Feature | k | Description |
+|---|---|---|
+| `nn_temp` | 1 | Temperature of the single nearest sensor |
+| `nn_dist` | 1 | Distance to the nearest sensor |
+| `broad_temp_mean` | 5 | Mean temperature of 5 nearest sensors |
+| `broad_temp_std` | 5 | Std of 5 nearest sensor temperatures |
+
+### HistGradientBoostingRegressor
+
+Direct temperature prediction from 16 features:
+- 11 base features (coordinates, time, power, engineered)
+- 1 global IDW estimate
+- 4 KNN spatial features
+
+No blending, no OPA sample weights.
+
+---
+
+## Results
+
+| Submission | Val RMSE | Kaggle Score |
+|---|---|---|
+| `baseline_submission.csv` | — | 4.054 |
+| `neighbor_submission.csv` | — | 3.747 |
+| `best_submission.csv` | 5.190 | **3.42** |
+
+---
+
+## Architecture Decision Log
+
+| Decision | Rationale |
 |---|---|
-| **1** | **5.200** |
-| 3 | 5.688 |
-| 5 | 5.900 |
-| 8 | 5.651 |
-| 10 | 6.001 |
-| 20 | 6.192 |
+| `r_xy` over `r_xyz` | Geometry is 2D (cross-section); z adds noise |
+| `coor_x`, `coor_y` separately | Tunnel is not radially symmetric; material zones break symmetry |
+| Global IDW over local (k=20) | Local IDW k=20 tested → worse results (4.2 on Kaggle vs 3.42) |
+| IDW as feature, not blend | Blending α×IDW+(1-α)×HistGB tested → consistently worse than direct prediction |
+| No OPA sample weights | Adding OPA weights (×3) tested → did not improve overall RMSE |
+| Sensor-level train/val split | Prevents any spatial leakage between train and validation |
+| Keep all 16 features | Removing low-importance features (permutation) degraded RMSE — correlated features protect each other during training |
+| Buffer boundary at coor_x = 1.4 m | Tunnel cross-section shows rectangular buffer zone, not circular |
 
-k=1 domine car la **dilution spatiale** (moyenner des capteurs lointains) introduit plus de biais que le bruit d'une seule mesure.
+---
 
-### Absence de fuite de données
+## Feature Importance (Native — Split Gain)
 
-Les températures des 47 capteurs de **validation ne servent jamais de source** pour les features voisines des données d'entraînement. La carte de voisins de validation est construite exclusivement à partir des 185 capteurs d'entraînement.
-
-### Features les plus importantes (HistGB + hybride)
-
-| Feature | Rôle |
+| Feature | Importance |
 |---|---|
-| `nn_temp` | Température du voisin le plus proche — signal spatial direct |
-| `power_over_r_xy` | Densité de puissance — très physique |
-| `power` | Puissance de chauffage brute |
-| `broad_temp_mean` | Moyenne des 5 voisins — robustesse |
-| `time` | Temps écoulé |
-| `coor_x` | Position spatiale |
+| `power_over_r_xy` | 7.28 |
+| `power` | 4.10 |
+| `time` | 1.69 |
+| `coor_x` | 1.64 |
+| `idw_temp` | 1.25 |
+| `power_x_time` | 1.14 |
+| `r_xy` | 0.63 |
+| `coor_y` | 0.47 |
+| `nn_dist` | 0.15 |
+| `r_xyz`, `coor_z`, `time_years`, `abs_y` | ≈ 0 |
+
+> Features with near-zero native importance were kept: removing them caused val RMSE to increase from 5.190 → 5.430, because permutation importance misleads when features are correlated.
 
 ---
 
-## Pourquoi LightGBM n'améliore pas ici
+## Possible Further Improvements
 
-LightGBM seul a introduit de l'overfitting spatial (score Kaggle 4.17 vs 4.05 baseline). Combiné aux features hybrides, il reste moins bon que HistGB (RMSE 5.52 vs 5.29) car `nn_temp` est déjà une quasi-prédiction directe — HistGradientBoosting l'exploite plus efficacement que l'approche par arbres de LightGBM.
-
----
-
-## Pistes d'amélioration futures
-
-- **Ensemble** : moyenne pondérée de plusieurs modèles
-- **Plus de voisins contextuels** : ajouter le 2e et 3e voisin comme features séparées plutôt qu'en moyenne
-- **Features temporelles** : encoder les patterns de variation de température dans le temps par capteur
-- **Modèle physique** : intégrer l'équation de diffusion thermique comme prior
+- **Tune IDW power** `p`: test p=1, p=3 to adjust spatial decay
+- **Add angle feature** θ = `atan2(y, x)`: tunnel is not symmetric, angle matters
+- **Temporal gradient**: rate of temperature change per neighbouring sensor
+- **Kriging / GPR**: models spatial covariance — more principled than IDW
+- **Sensor drift detection**: bonus points available on Kaggle leaderboard
